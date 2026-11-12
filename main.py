@@ -242,15 +242,34 @@ def extraer_datos_generales(texto):
             coincidencia.group(1)
         ).strip()
 
+   
     # ----------------------------------------------
     # ESPECIALISTA
     # ----------------------------------------------
 
+    # FORMATO 1:
+    # Cirujano: NOMBRE Especialidad: ESPECIALIDAD
+
     coincidencia = re.search(
-        r"\bCirujano\s*:\s*(.+?)(?=\s+Especialidad\s*:)",
+        r"\bCirujano\s*:\s*(.+?)"
+        r"(?=\s+Especialidad\s*:)",
         texto_inicial,
         re.IGNORECASE | re.DOTALL
     )
+
+    # FORMATO 2:
+    # CIRUJANO ES235 NOMBRE
+    # Especialidad CIRUGIA PEDIATRICA
+
+    if not coincidencia:
+
+        coincidencia = re.search(
+            r"\bCIRUJANO\s+[A-Z]{1,4}\d{2,6}\s+"
+            r"(.+?)"
+            r"(?=\s+Especialidad\b)",
+            texto,
+            re.IGNORECASE | re.DOTALL
+        )
 
     if coincidencia:
 
@@ -331,241 +350,198 @@ def limpiar_descripcion_procedimiento(descripcion):
 
 
 
+
+# ==================================================
+# MODULO 5: EXTRACCION INTELIGENTE DE PROCEDIMIENTOS
+# ==================================================
+
 def extraer_procedimientos(texto):
     """
-    Extrae procedimientos de CIRUGIAS.
-    Si falta el codigo, lo busca en DESCRIPCION CIRUGIA.
-    Conserva los nombres en MAYUSCULAS.
+    Reconoce los dos formatos de HOSVITAL:
+
+    1. CIRUGIAS + DESCRIPCION CIRUGIA.
+    2. DESCRIPCION DE CIRUGIAS sin tabla CIRUGIAS.
+
+    Evita duplicar procedimientos presentes en ambas secciones.
+    Conserva codigo, descripcion y cantidad.
     """
 
-    procedimientos = []
-    procedimiento_actual = None
+    procedimientos_tabla = []
+    procedimientos_descripcion = []
 
-    # ----------------------------------------------
-    # ENCONTRAR SECCION CIRUGIAS
-    # ----------------------------------------------
+    lineas = texto.splitlines()
 
-    inicio = re.search(
-        r"(?im)^\s*CIRUG[IÍ]AS\b[^\n]*",
-        texto
+    # ------------------------------------------------
+    # FUNCION PARA RECONOCER ENCABEZADOS
+    # ------------------------------------------------
+
+    patron_descripcion = re.compile(
+        r"^\s*DESCRIPCI[ÓO]N\s+"
+        r"(?:DE\s+(?:LA\s+)?)?"
+        r"CIRUG[IÍ]AS?\b",
+        re.IGNORECASE
     )
 
-    if not inicio:
-        return procedimientos
-
-    texto_posterior = texto[inicio.end():]
-
-    # ----------------------------------------------
-    # ENCONTRAR FIN DE LA TABLA CIRUGIAS
-    # ----------------------------------------------
-
-    fin = re.search(
-        r"(?im)^\s*DESCRIPCI[ÓO]N\s+(?:DE\s+LA\s+)?CIRUG[IÍ]A\b[^\n]*",
-        texto_posterior
+    patron_cirugias = re.compile(
+        r"^\s*CIRUG[IÍ]AS\s*$",
+        re.IGNORECASE
     )
 
-    if fin:
-        seccion_cirugias = texto_posterior[:fin.start()]
-    else:
-        seccion_cirugias = texto_posterior
+    # ------------------------------------------------
+    # FUNCION PARA LIMPIAR NOMBRES
+    # ------------------------------------------------
 
-    # ----------------------------------------------
-    # GUARDAR PROCEDIMIENTO
-    # ----------------------------------------------
+    def limpiar_nombre(nombre):
 
-    def guardar_procedimiento():
+        nombre = limpiar_descripcion_procedimiento(nombre)
 
-        nonlocal procedimiento_actual
-
-        if procedimiento_actual is None:
-            return
-
-        codigo = procedimiento_actual["codigo"]
-
-        descripcion = limpiar_descripcion_procedimiento(
-            procedimiento_actual["procedimiento"]
+        nombre = re.sub(
+            r"\s+Y\d{2,3}\s*$",
+            "",
+            nombre,
+            flags=re.IGNORECASE
         )
 
-        cantidad = procedimiento_actual["cantidad"]
+        return re.sub(r"\s+", " ", nombre).strip().upper()
 
-        if descripcion:
-            procedimientos.append({
+    # ------------------------------------------------
+    # FUNCION PARA IDENTIFICAR CODIGO Y PROCEDIMIENTO
+    # ------------------------------------------------
+
+    patron_fila = re.compile(
+        r"^\s*(?:(\d+)\s+)?"
+        r"([A-Z]{1,3}\d{5,8}|\d{5,8}(?:-\d+)?)"
+        r"(?:\s+(.+?))?\s*$",
+        re.IGNORECASE
+    )
+
+    # =================================================
+    # PARTE A: LEER APARTADO CIRUGIAS
+    # =================================================
+
+    inicio_tabla = None
+
+    for i, linea in enumerate(lineas):
+
+        if patron_cirugias.match(linea):
+
+            inicio_tabla = i + 1
+            break
+
+    if inicio_tabla is not None:
+
+        for linea in lineas[inicio_tabla:]:
+
+            # La tabla termina cuando comienza la descripcion.
+            if patron_descripcion.match(linea):
+
+                break
+
+            coincidencia = patron_fila.match(linea)
+
+            if not coincidencia:
+                continue
+
+            cantidad = int(coincidencia.group(1) or 1)
+
+            codigo = coincidencia.group(2).strip().upper()
+
+            nombre = limpiar_nombre(
+                coincidencia.group(3) or ""
+            )
+
+            if not nombre:
+                continue
+
+            procedimientos_tabla.append({
                 "codigo": codigo,
-                "procedimiento": descripcion.upper(),
+                "procedimiento": nombre,
                 "cantidad": cantidad
             })
 
-        procedimiento_actual = None
-
-    # ----------------------------------------------
-    # RECORRER TABLA CIRUGIAS
-    # ----------------------------------------------
-
-    for linea in seccion_cirugias.splitlines():
-
-        linea_limpia = linea.strip()
-
-        if not linea_limpia:
-            continue
-
-        linea_normalizada = normalizar_texto(linea_limpia)
-
-        if linea_normalizada.startswith((
-            "cant",
-            "cantidad",
-            "codigo",
-            "nombre de la cirugia",
-            "nombre cirugia",
-            "grupo",
-            "uvr"
-        )):
-            continue
-
-        # Buscar primero una fila que tenga codigo.
-
-        coincidencia = re.match(
-            r"^\s*(?:(\d+)\s+)?"
-            r"([A-Z]{1,3}\d{5,8}|\d{5,8}(?:-\d+)?)"
-            r"(?:\s+(.+?))?\s*$",
-            linea_limpia,
-            re.IGNORECASE
-        )
-
-        if coincidencia:
-
-            guardar_procedimiento()
-
-            cantidad = int(coincidencia.group(1) or 1)
-            codigo = coincidencia.group(2).strip().upper()
-
-            descripcion = (
-                coincidencia.group(3) or ""
-            ).strip()
-
-            procedimiento_actual = {
-                "cantidad": cantidad,
-                "codigo": codigo,
-                "procedimiento": descripcion
-            }
-
-            continue
-
-        # Si hay cantidad y nombre, pero no codigo,
-        # guardar el procedimiento para buscar respaldo.
-
-        coincidencia_sin_codigo = re.match(
-            r"^\s*(\d+)\s+([A-ZÁÉÍÓÚÑ].+?)\s*$",
-            linea_limpia,
-            re.IGNORECASE
-        )
-
-        if coincidencia_sin_codigo:
-
-            guardar_procedimiento()
-
-            procedimiento_actual = {
-                "cantidad": int(coincidencia_sin_codigo.group(1)),
-                "codigo": "",
-                "procedimiento": coincidencia_sin_codigo.group(2).strip()
-            }
-
-        elif procedimiento_actual:
-
-            continuacion = limpiar_descripcion_procedimiento(
-                linea_limpia
-            )
-
-            if continuacion:
-                procedimiento_actual["procedimiento"] += (
-                    " " + continuacion
-                )
-
-    # Guardar el ultimo procedimiento de CIRUGIAS.
-    guardar_procedimiento()
-
-    # ==============================================
-    # RESPALDO: BUSCAR CODIGOS EN DESCRIPCION CIRUGIA
-    # ==============================================
-
-    lineas = texto_posterior.splitlines()
+    # =================================================
+    # PARTE B: LEER DESCRIPCION CIRUGIA
+    # =================================================
 
     dentro_descripcion = False
-    lineas_descripcion = []
 
     for linea in lineas:
 
-        linea_normalizada = normalizar_texto(linea)
+        if patron_descripcion.match(linea):
 
-        if re.match(
-            r"^\s*descripcion\s+cirugia\b",
-            linea_normalizada
-        ):
             dentro_descripcion = True
             continue
 
-        if dentro_descripcion:
+        if not dentro_descripcion:
+            continue
 
-            if "dx preoperatorio" in linea_normalizada:
-                break
+        linea_normalizada = normalizar_texto(linea)
 
-            coincidencia = re.match(
-                r"^\s*(\d{5,8})\s+(.+?)\s*$",
-                linea
-            )
+        # Final de la seccion.
+        if re.match(
+            r"^\s*dx\s+(?:preoperatorio|postoperatorio)\b",
+            linea_normalizada
+        ):
+            break
 
-            if coincidencia:
+        if re.match(
+            r"^\s*(?:tipo de herida|cantidad de sangrado|"
+            r"realizacion acto quirurgico|complicaciones)\b",
+            linea_normalizada
+        ):
+            break
 
-                codigo = coincidencia.group(1).strip()
+        coincidencia = patron_fila.match(linea)
 
-                nombre_original = coincidencia.group(2).strip()
+        if not coincidencia:
+            continue
 
-                nombre_comparacion = normalizar_texto(
-                    nombre_original
-                )
+        cantidad = int(coincidencia.group(1) or 1)
 
-                lineas_descripcion.append(
-                    (
-                        codigo,
-                        nombre_original,
-                        nombre_comparacion
-                    )
-                )
+        codigo = coincidencia.group(2).strip().upper()
 
-    # ==============================================
-    # COMPLETAR CODIGOS FALTANTES
-    # ==============================================
+        nombre = limpiar_nombre(
+            coincidencia.group(3) or ""
+        )
 
-    for codigo, nombre_original, nombre_comparacion in lineas_descripcion:
+        if not nombre:
+            continue
 
-        encontrado = False
+        procedimientos_descripcion.append({
+            "codigo": codigo,
+            "procedimiento": nombre,
+            "cantidad": cantidad
+        })
 
-        for procedimiento in procedimientos:
+    # =================================================
+    # PARTE C: UNIFICAR AMBAS FUENTES
+    # =================================================
 
-            nombre_actual = normalizar_texto(
-                procedimiento.get("procedimiento", "")
-            )
+    procedimientos = list(procedimientos_tabla)
 
-            if nombre_actual and (
-                nombre_actual in nombre_comparacion
-                or nombre_comparacion in nombre_actual
-            ):
+    codigos_existentes = {
+        p["codigo"]
+        for p in procedimientos
+        if p["codigo"]
+    }
 
-                if not procedimiento.get("codigo"):
-                    procedimiento["codigo"] = codigo
+    for descripcion in procedimientos_descripcion:
 
-                encontrado = True
-                break
+        codigo = descripcion["codigo"]
 
-        # Si no estaba en CIRUGIAS, agregarlo desde
-        # DESCRIPCION CIRUGIA.
+        # Si el codigo ya existe en la tabla,
+        # no volver a agregarlo.
 
-        if not encontrado:
+        if codigo in codigos_existentes:
+            continue
 
-            procedimientos.append({
-                "codigo": codigo,
-                "procedimiento": nombre_original.upper(),
-                "cantidad": 1
-            })
+        procedimientos.append(descripcion)
+
+        codigos_existentes.add(codigo)
+
+    # =================================================
+    # RESULTADO FINAL
+    # =================================================
 
     return procedimientos
 
